@@ -13,46 +13,119 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, StaleElementReferenceException
 
 
 class WhoScoredScraper:
     """
-    A class for scraping football match data from WhoScored.com,
-    The class contains functions designed to scrape data for one season, one match, one league, etc.
+    A class for scraping football match data from WhoScored.com, 
+    The class also contains functions designed to scrape data for one season, one match, one league, etc.
     """
     def __init__(self, maximize_window=False):
         """
-        Initializes the WhoScoredScraper instance,
+        Initializes the WhoScoredScraper instance, 
         also defines the driver settings to be used by other functions of the class.
 
         :param maximize_window: Whether to maximize the browser window when scraping(default: False).
         """
-        pass
+        options = Options()
+        if not maximize_window:
+            options.add_argument(
+                "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
+            )
+            
+        # WSL-specific options
+        options.add_argument('--headless=new')  # Updated headless mode syntax
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--remote-debugging-port=9222')  # Add this line
+        options.add_argument('--disable-extensions')  # Add this line
+        
+        try:
+            # Use the system's Chromium installation
+            self.driver = webdriver.Chrome(
+                service=Service('/usr/bin/chromedriver'),
+                options=options
+            )
+        except Exception as e:
+            print(f"Failed to initialize driver: {e}")
+            raise
+
+        if maximize_window:
+            # If maximize window is set to True, make the window visible in which the driver is scraping
+            self.driver.maximize_window()
 
     def __del__(self):
         """
         Cleans up memory by quitting the WebDriver instance. 
         Default destructor called during garbage collection.
         """
-        pass
+        self.driver.quit()
 
     def quit_driver(self):
         """
         Cleans up memory by quitting the WebDriver instance.
-        Called manually if we need to quit the driver,
+        Called manually if we need to quit the driver, 
         when it is not closed by garbage collector
         """
-        pass
+        if self.driver:
+            self.driver.quit()
 
-    def get_competition_urls(self):
+    def get_competition_urls(self): 
         """
-        Scrapes the popular tournaments' names and URLs from WhoScored.
+        Scrapes the popular tournaments' names and URLs from a website.
 
         :return: A dictionary containing competition names as keys and their URLs as values.
         """
-        pass
+        # Open the target website
+        self.driver.get("https://1xbet.whoscored.com/")
 
+        # First, try to handle any popup that might appear
+        try:
+            popup_close_button = WebDriverWait(self.driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='Close this dialog']"))
+            )
+            popup_close_button.click()
+            time.sleep(1)  # Small delay to ensure popup is fully closed
+        except (TimeoutException, NoSuchElementException):
+            # If no popup is found or can't be closed, continue
+            pass
+        tournaments_btn = WebDriverWait(self.driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, "/html/body/div[1]/div/div/div/div[4]/div[1]/div/div/button[1]"))
+        )
+        tournaments_btn.click()
+
+        # Wait for the tournament grid to be visible
+        WebDriverWait(self.driver, 5).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "TournamentsDropdownMenu-module_dropdownTournamentsGrid__Ia99x"))
+        )
+
+        # Find all tournament buttons within the grid
+        tournament_elements = self.driver.find_elements(
+            By.CLASS_NAME, 
+            "TournamentNavButton-module_tournamentBtn__ZGW8P"
+        )
+    
+        # Initialize dictionary to store competition names and URLs
+    # Initialize dictionary to store competition names and URLs
+        competitions = {}
+        
+        # Extract names and URLs from each tournament button
+        for element in tournament_elements:
+            try:
+                # Find the clickable area (a tag) within the tournament button
+                link_element = element.find_element(By.CLASS_NAME, "TournamentNavButton-module_clickableArea__ZFnBl")
+                href = link_element.get_attribute("href")
+                name = link_element.text.strip()
+                
+                if href and name:
+                    competitions[name] = href
+            except (NoSuchElementException, StaleElementReferenceException):
+                continue
+
+        return competitions
+    
     def translate_date(self, data):
         """
         Translates date strings to a consistent format.
@@ -166,3 +239,7 @@ class WhoScoredScraper:
         :return: Pandas DataFrame containing season events data.
         """
         pass
+    
+if __name__ == "__main__":
+    scraper = FootballDataScraper(maximize_window=True)
+    print(scraper.get_competition_urls())
