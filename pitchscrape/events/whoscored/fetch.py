@@ -29,32 +29,33 @@ class WhoScoredScraper:
         :param maximize_window: Whether to maximize the browser window when scraping(default: False).
         """
         options = Options()
-        if not maximize_window:
-            options.add_argument(
-                "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
-            )
-            
-        # WSL-specific options
-        options.add_argument('--headless=new')  # Updated headless mode syntax
+        
+        # Basic options
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
-        options.add_argument('--remote-debugging-port=9222')  # Add this line
-        options.add_argument('--disable-extensions')  # Add this line
+        options.add_argument('--disable-extensions')
+        options.add_argument('--remote-debugging-port=9222')
+        
+        # Add these for better automation handling
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--disable-infobars')
+        
+        if not maximize_window:
+            options.add_argument('--headless=new')
         
         try:
-            # Use the system's Chromium installation
             self.driver = webdriver.Chrome(
-                service=Service('/usr/bin/chromedriver'),
+                service=Service(),
                 options=options
             )
+            
+            if maximize_window:
+                self.driver.maximize_window()
+                
         except Exception as e:
             print(f"Failed to initialize driver: {e}")
             raise
-
-        if maximize_window:
-            # If maximize window is set to True, make the window visible in which the driver is scraping
-            self.driver.maximize_window()
 
     def __del__(self):
         """
@@ -241,5 +242,5 @@ class WhoScoredScraper:
         pass
     
 if __name__ == "__main__":
-    scraper = FootballDataScraper(maximize_window=True)
+    scraper = WhoScoredScraper(maximize_window=True)
     print(scraper.get_competition_urls())
