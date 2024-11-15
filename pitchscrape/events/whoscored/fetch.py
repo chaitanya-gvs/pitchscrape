@@ -16,7 +16,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException, TimeoutException, StaleElementReferenceException
 
 
-class FootballDataScraper:
+class WhoScoredScraper:
     """
     A class for scraping football match data from WhoScored.com, 
     The class also contains functions designed to scrape data for one season, one match, one league, etc.
@@ -109,7 +109,6 @@ class FootballDataScraper:
         )
     
         # Initialize dictionary to store competition names and URLs
-    # Initialize dictionary to store competition names and URLs
         competitions = {}
         
         # Extract names and URLs from each tournament button
@@ -187,7 +186,7 @@ class FootballDataScraper:
         
         return sorted_data
 
-    def get_match_urls(self, competitions, competition, season):
+    def get_match_urls(self, competition_urls, competition_name, season):
         """
         Get a list of match URLs for a specific competition and season.
 
@@ -198,7 +197,7 @@ class FootballDataScraper:
         :raises ValueError: If the specified season is not found.
         """
         # Navigate to competition URL
-        self.driver.get(competitions[competition])
+        self.driver.get(competition_urls[competition_name])
         time.sleep(5)
         
         # Find and parse available seasons
@@ -222,10 +221,10 @@ class FootballDataScraper:
                         stage_name = self.driver.find_element(By.XPATH, f'//*[@id="stages"]/option[{i}]').text
                         
                         # Handle special cases for different competition types
-                        if competition in ['Champions League', 'Europa League']:
+                        if competition_name in ['Champions League', 'Europa League']:
                             if not ('Grp' in stage_name or 'Final Stage' in stage_name):
                                 continue
-                        elif competition == 'Major League Soccer':
+                        elif competition_name == 'Major League Soccer':
                             if 'Grp. ' in stage_name:
                                 continue
                         
@@ -267,15 +266,25 @@ class FootballDataScraper:
         season_names = [re.search(r'\>(.*?)\<', season).group(1) for season in seasons]
         raise ValueError(f'Season not found. Available seasons: {season_names}')
 
-    def get_team_urls(self, team, match_urls):
+    def get_team_urls(self, match_urls, team_name):
         """
         Get a list of match URLs for a specific team from a list of match URLs.
 
-        :param team: Name of the team.
         :param match_urls: List of match URLs.
+        :param team_name: Name of the team.
         :return: List of match URLs involving the specified team.
         """
-        pass
+        # Create a dictionary to store unique match data involving the specified team
+        unique_team_data = {
+            fixture["url"]: fixture
+            for fixture in match_urls
+            if team_name in (fixture["home"], fixture["away"])
+        }
+
+        # Convert the dictionary values (unique match data) back to a list
+        # This ensures that each match is only included once even if it appears multiple times
+        # (e.g., the team plays both home and away matches against the same opponent)
+        return list(unique_team_data.values())
 
     def get_fixture_data(self):
         """
@@ -420,4 +429,8 @@ class FootballDataScraper:
     
 if __name__ == "__main__":
     scraper = WhoScoredScraper(maximize_window=True)
-    print(scraper.get_competition_urls())
+    competitions = scraper.get_competition_urls()
+    print(competitions)
+    match_urls = scraper.get_match_urls(competitions, 'LaLiga', '2023/2024')
+    team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
+    print(team_urls)
