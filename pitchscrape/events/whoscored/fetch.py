@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from datetime import datetime
+from collections import OrderedDict
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -13,7 +14,8 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, StaleElementReferenceException, WebDriverException
+
 
 
 class WhoScoredScraper:
@@ -110,7 +112,7 @@ class WhoScoredScraper:
     
         # Initialize dictionary to store competition names and URLs
         competitions = {}
-        
+        seen_names = set()  # Track names that have already been added
         # Extract names and URLs from each tournament button
         for element in tournament_elements:
             try:
@@ -119,8 +121,13 @@ class WhoScoredScraper:
                 href = link_element.get_attribute("href")
                 name = link_element.text.strip()
                 
-                if href and name:
+                # Handle the specific case for Premier League
+                if name == 'Premier League' in seen_names:
+                    name = 'Russian Premier League'
+                
+                if href and name not in seen_names:  # Check if name has already been added
                     competitions[name] = href
+                    seen_names.add(name)  # Add name to the set
             except (NoSuchElementException, StaleElementReferenceException):
                 continue
 
@@ -243,7 +250,7 @@ class WhoScoredScraper:
                         
                         all_urls.extend(valid_matches)
                         
-                except NoSuchElementException:
+                except:
                     # Handle competitions without stages
                     all_urls = []
                     self.driver.execute_script("window.scrollTo(0, 400)")
@@ -367,7 +374,57 @@ class WhoScoredScraper:
         :param match_url: URL of the match.
         :return: Dictionary containing match data.
         """
-        pass
+        try:
+            self.driver.get(match_url)
+        except WebDriverException as e:
+            return str(e)
+
+        time.sleep(5)
+        # Get script data from page source
+        script_content = self.driver.find_element(By.XPATH, '//*[@id="layout-wrapper"]/script[1]').get_attribute('innerHTML')
+
+        # Clean script content
+        script_content = re.sub(r"[\n\t]*", "", script_content)
+        script_content = script_content[script_content.index("matchId"):script_content.rindex("}")]
+
+        # This will give script content in list form 
+        script_content_list = list(filter(None, script_content.strip().split(',            ')))
+        metadata = script_content_list.pop(1) 
+
+        # String format to JSON format
+        match_data = json.loads(metadata[metadata.index('{'):])
+        keys = [item[:item.index(':')].strip() for item in script_content_list]
+        values = [item[item.index(':')+1:].strip() for item in script_content_list]
+        for key, val in zip(keys, values):
+            match_data[key] = json.loads(val)
+
+        # Get other details about the match
+        region = self.driver.find_element(By.XPATH, '//*[@id="breadcrumb-nav"]/span[1]').text
+        league = self.driver.find_element(By.XPATH, '//*[@id="breadcrumb-nav"]/a').text.split(' - ')[0]
+        season = self.driver.find_element(By.XPATH, '//*[@id="breadcrumb-nav"]/a').text.split(' - ')[1]
+        
+        if len(self.driver.find_element(By.XPATH, '//*[@id="breadcrumb-nav"]/a').text.split(' - ')) == 2:
+            competition_type = 'League'
+            competition_stage = ''
+        elif len(self.driver.find_element(By.XPATH, '//*[@id="breadcrumb-nav"]/a').text.split(' - ')) == 3:
+            competition_type = 'Knock Out'
+            competition_stage = self.driver.find_element(By.XPATH, '//*[@id="breadcrumb-nav"]/a').text.split(' - ')[-1]
+        else:
+            print('Getting more than 3 types of information about the competition.')
+
+        match_data['region'] = region
+        match_data['league'] = league
+        match_data['season'] = season
+        match_data['competitionType'] = competition_type
+        match_data['competitionStage'] = competition_stage
+
+        # Sort match_data dictionary alphabetically
+        match_data = OrderedDict(sorted(match_data.items()))
+        match_data = dict(match_data)
+
+        # print('Region: {}, League: {}, Season: {}, Match Id: {}'.format(region, league, season, match_data['matchId']))
+        
+        return match_data
 
     def get_matches_data(self, match_urls):
         """
@@ -430,7 +487,8 @@ class WhoScoredScraper:
 if __name__ == "__main__":
     scraper = WhoScoredScraper(maximize_window=True)
     competitions = scraper.get_competition_urls()
-    print(competitions)
     match_urls = scraper.get_match_urls(competitions, 'LaLiga', '2023/2024')
-    team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
-    print(team_urls)
+    # team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
+    match_data = scraper.get_match_data(match_urls[0]['url'])
+    print(match_data.keys())
+    # print(team_urls)
