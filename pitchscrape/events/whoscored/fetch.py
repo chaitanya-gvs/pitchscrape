@@ -3,7 +3,7 @@ import time
 import json
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from datetime import datetime
 from collections import OrderedDict
 
@@ -30,268 +30,426 @@ class WhoScoredScraper:
 
         :param maximize_window: Whether to maximize the browser window when scraping(default: False).
         """
+        self.BASE_URL = "https://1xbet.whoscored.com/"
+        
         options = Options()
         
-        # Basic options
+        # Basic options for stability
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--disable-extensions')
         options.add_argument('--remote-debugging-port=9222')
         
-        # Add these for better automation handling
+        # Anti-bot detection options
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_argument('--disable-infobars')
+        options.add_experimental_option('excludeSwitches', ['enable-automation'])
+        options.add_experimental_option('useAutomationExtension', False)
+        
+        # Performance options
+        options.add_argument('--disable-notifications')
+        options.add_argument('--disable-popup-blocking')
+        options.add_argument('--disable-logging')
+        options.page_load_strategy = 'eager'  # Load faster by not waiting for all resources
+        
+        # Set a realistic user agent
+        options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36')
         
         if not maximize_window:
             options.add_argument('--headless=new')
+            # Set a default window size for headless mode
+            options.add_argument('--window-size=1920,1080')
         
         try:
+            service = Service()
+            # Set longer timeout for driver initialization
+            service.start_error_message = "Chrome failed to start within 60 seconds."
+            
+            # Create driver with appropriate options
             self.driver = webdriver.Chrome(
-                service=Service(),
+                service=service,
                 options=options
             )
             
             if maximize_window:
                 self.driver.maximize_window()
                 
+            # Set default timeouts
+            self.driver.set_page_load_timeout(30)
+            self.driver.implicitly_wait(10)
+                
         except Exception as e:
             print(f"Failed to initialize driver: {e}")
             raise
+        
+        # Store initial window handle
+        self.main_window = self.driver.current_window_handle
 
     def __del__(self):
         """
-        Cleans up memory by quitting the WebDriver instance. 
+        Cleans up resources by quitting the WebDriver instance. 
         Default destructor called during garbage collection.
         """
-        self.driver.quit()
-
-    def quit_driver(self):
-        """
-        Cleans up memory by quitting the WebDriver instance.
-        Called manually if we need to quit the driver, 
-        when it is not closed by garbage collector
-        """
-        if self.driver:
-            self.driver.quit()
-
-    def get_competition_urls(self): 
-        """
-        Scrapes the popular tournaments' names and URLs from a website.
-
-        :return: A dictionary containing competition names as keys and their URLs as values.
-        """
-        # Open the target website
-        self.driver.get("https://1xbet.whoscored.com/")
-
-        # First, try to handle any popup that might appear
         try:
-            popup_close_button = WebDriverWait(self.driver, 5).until(
+            if hasattr(self, 'driver'):
+                self.driver.quit()
+        except Exception as e:
+            print(f"Error during driver cleanup: {e}")
+
+    def cleanup_driver(self):
+        """
+        Explicitly cleans up WebDriver resources.
+        Use this method for manual cleanup when garbage collection is unreliable.
+        """
+        try:
+            if hasattr(self, 'driver') and self.driver:
+                self.driver.quit()
+                self.driver = None
+        except Exception as e:
+            print(f"Error during manual driver cleanup: {e}")
+
+    def get_competition_urls(self) -> dict[str, str]: 
+        """
+        Scrapes the popular tournaments' names and URLs from WhoScored.com.
+
+        :return: dict[str, str]: Dictionary mapping competition names to their URLs
+                Example: {'Premier League': 'https://...', 'LaLiga': 'https://...'}
+        """
+        POPUP_TIMEOUT = 5
+        DROPDOWN_TIMEOUT = 10
+        GRID_TIMEOUT = 5
+
+        # Navigate to the website
+        self.driver.get(self.BASE_URL)
+
+        # Handle potential popup dialog
+        try:
+            dialog_close_button = WebDriverWait(self.driver, POPUP_TIMEOUT).until(
                 EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='Close this dialog']"))
             )
-            popup_close_button.click()
-            time.sleep(1)  # Small delay to ensure popup is fully closed
+            dialog_close_button.click()
+            time.sleep(1)  # Ensure popup closes completely
         except (TimeoutException, NoSuchElementException):
-            # If no popup is found or can't be closed, continue
             pass
-        tournaments_btn = WebDriverWait(self.driver, 10).until(
+
+        # Click tournaments dropdown
+        competitions_dropdown = WebDriverWait(self.driver, DROPDOWN_TIMEOUT).until(
             EC.element_to_be_clickable((By.XPATH, "/html/body/div[1]/div/div/div/div[4]/div[1]/div/div/button[1]"))
         )
-        tournaments_btn.click()
+        competitions_dropdown.click()
 
-        # Wait for the tournament grid to be visible
-        WebDriverWait(self.driver, 5).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "TournamentsDropdownMenu-module_dropdownTournamentsGrid__Ia99x"))
+        # Wait for competitions grid
+        competition_grid_class = "TournamentsDropdownMenu-module_dropdownTournamentsGrid__Ia99x"
+        WebDriverWait(self.driver, GRID_TIMEOUT).until(
+            EC.presence_of_element_located((By.CLASS_NAME, competition_grid_class))
         )
 
-        # Find all tournament buttons within the grid
-        tournament_elements = self.driver.find_elements(
+        # Get all competition buttons
+        competition_buttons = self.driver.find_elements(
             By.CLASS_NAME, 
             "TournamentNavButton-module_tournamentBtn__ZGW8P"
         )
     
-        # Initialize dictionary to store competition names and URLs
+        # Store competition data
         competitions = {}
-        seen_names = set()  # Track names that have already been added
-        # Extract names and URLs from each tournament button
-        for element in tournament_elements:
+        processed_names = set()  # Track processed competition names
+
+        # Extract competition information
+        for competition_button in competition_buttons:
             try:
-                # Find the clickable area (a tag) within the tournament button
-                link_element = element.find_element(By.CLASS_NAME, "TournamentNavButton-module_clickableArea__ZFnBl")
-                href = link_element.get_attribute("href")
-                name = link_element.text.strip()
+                competition_link = competition_button.find_element(
+                    By.CLASS_NAME, 
+                    "TournamentNavButton-module_clickableArea__ZFnBl"
+                )
+                competition_url = competition_link.get_attribute("href")
+                competition_name = competition_link.text.strip()
                 
-                # Handle the specific case for Premier League
-                if name == 'Premier League' in seen_names:
-                    name = 'Russian Premier League'
+                # Handle duplicate Premier League case
+                if competition_name == 'Premier League' and competition_name in processed_names:
+                    competition_name = 'Russian Premier League'
                 
-                if href and name not in seen_names:  # Check if name has already been added
-                    competitions[name] = href
-                    seen_names.add(name)  # Add name to the set
+                # Store unique competitions
+                if competition_url and competition_name not in processed_names:
+                    competitions[competition_name] = competition_url
+                    processed_names.add(competition_name)
+
             except (NoSuchElementException, StaleElementReferenceException):
                 continue
 
         return competitions
-
-    def translate_date(self, data):
+    
+    def translate_date(self, match_data: list[dict]) -> list[dict]:
         """
-        Translates date strings to a consistent format and removes matches with invalid dates.
+        Standardizes date formats and filters out matches with invalid dates.
         
-        :param data: List of dictionaries containing match data with dates.
-        :return: List of dictionaries with translated dates, excluding matches with invalid dates.
+        :param match_data: List of dictionaries containing match information with dates
+                         Expected format: [{'date': 'Mon DD YYYY', ...}, ...]
+        :return: List of dictionaries with standardized dates, excluding invalid dates
+        :raises ValueError: If match_data is empty or has invalid structure
+        
+        Example:
+            Input: [{'date': 'Okt 15 2023', ...}, {'date': '? ? ?', ...}]
+            Output: [{'date': 'Oct 15 2023', ...}]
         """
+        if not match_data:
+            raise ValueError("Empty match data provided")
+
         # Dictionary mapping various month abbreviations to standard format
-        TRANSLATE_DICT = {
-            'Jan': 'Jan',
-            'Feb': 'Feb',
-            'Mar': 'Mar',
-            'Mac': 'Mar',  # Alternative spelling
-            'Apr': 'Apr',
-            'May': 'May',
-            'Mei': 'May',  # Alternative spelling
-            'Jun': 'Jun',
-            'Jul': 'Jul',
-            'Aug': 'Aug',
-            'Ago': 'Aug',  # Alternative spelling
-            'Sep': 'Sep',
-            'Oct': 'Oct',
-            'Okt': 'Oct',  # Alternative spelling
-            'Nov': 'Nov',
-            'Dec': 'Dec',
-            'Des': 'Dec'   # Alternative spelling
+        MONTH_MAPPINGS = {
+            # English standard
+            'Jan': 'Jan', 'Feb': 'Feb', 'Mar': 'Mar',
+            'Apr': 'Apr', 'May': 'May', 'Jun': 'Jun',
+            'Jul': 'Jul', 'Aug': 'Aug', 'Sep': 'Sep',
+            'Oct': 'Oct', 'Nov': 'Nov', 'Dec': 'Dec',
+            
+            # Alternative spellings
+            'Mac': 'Mar',  # Malaysian
+            'Mei': 'May',  # Indonesian
+            'Ago': 'Aug',  # Spanish/Portuguese
+            'Okt': 'Oct',  # German/Dutch
+            'Des': 'Dec'   # Indonesian
         }
 
-        # Find indices of matches with invalid dates (containing '?')
-        unwanted_indices = [i for i, match in enumerate(data) if '?' in match['date']]
+        # Create a new list instead of modifying the input
+        valid_matches = []
+        
+        for match in match_data:
+            try:
+                date_string = match.get('date', '')
+                
+                # Skip matches with invalid dates
+                if '?' in date_string:
+                    continue
+                    
+                date_components = date_string.split()
+                
+                # Validate date components
+                if len(date_components) < 3:
+                    print(f"Warning: Invalid date format found: {date_string}")
+                    continue
+                    
+                month = date_components[0]
+                
+                # Standardize month if mapping exists
+                if month in MONTH_MAPPINGS:
+                    standardized_date = ' '.join([
+                        MONTH_MAPPINGS[month],
+                        date_components[1],
+                        date_components[2]
+                    ])
+                    match['date'] = standardized_date
+                    valid_matches.append(match)
+                else:
+                    print(f"Warning: Unknown month abbreviation found: {month}")
+                    continue
+                    
+            except (KeyError, IndexError) as e:
+                print(f"Error processing match data: {e}")
+                continue
 
-        # Remove matches with invalid dates (in reverse order to avoid index issues)
-        for i in sorted(unwanted_indices, reverse=True):
-            del data[i]
+        if not valid_matches:
+            print("Warning: No valid matches found after date translation")
+            
+        return valid_matches
 
-        # Translate dates for remaining matches
-        for match in data:
-            date_parts = match['date'].split()
-            if len(date_parts) >= 3:  # Ensure we have all date components
-                month_abbr = date_parts[0]
-                if month_abbr in TRANSLATE_DICT:
-                    match['date'] = ' '.join([TRANSLATE_DICT[month_abbr], date_parts[1], date_parts[2]])
-
-        return data
-
-    def sort_match_urls(self, data):
+    def sort_match_urls(self, match_data: list[dict]) -> list[dict]:
         """
         Sort a list of match URLs based on their dates.
 
-        :param data: List of dictionaries containing match data with 'date' field in format 'Day, Mon DD YYYY'.
-        :return: Sorted list of match URLs ordered by date.
-        """
-        # Sort the data using datetime.strptime to properly compare dates
-        sorted_data = sorted(
-            data, 
-            key=lambda x: datetime.strptime(x['date'], '%A, %b %d %Y')
-        )
+        :param match_data: List of dictionaries containing match information
+                         Expected format: [{'date': 'Monday, Jan 15 2024', ...}, ...]
+        :return: List of dictionaries sorted by date in ascending order
+        :raises ValueError: If match_data is empty or contains invalid date formats
         
-        return sorted_data
+        Example:
+            Input: [
+                {'date': 'Monday, Jan 15 2024', 'url': 'match1'},
+                {'date': 'Sunday, Jan 14 2024', 'url': 'match2'}
+            ]
+            Output: [
+                {'date': 'Sunday, Jan 14 2024', 'url': 'match2'},
+                {'date': 'Monday, Jan 15 2024', 'url': 'match1'}
+            ]
+        """
+        if not match_data:
+            raise ValueError("Empty match data provided")
 
-    def get_match_urls(self, competition_urls, competition_name, season):
+        DATE_FORMAT = '%A, %b %d %Y'  # Monday, Jan 15 2024
+        
+        def parse_date(match: dict) -> datetime:
+            """Helper function to parse date with error handling"""
+            try:
+                return datetime.strptime(match.get('date', ''), DATE_FORMAT)
+            except ValueError as e:
+                raise ValueError(f"Invalid date format in match data: {match.get('date', '')}. "
+                               f"Expected format: {DATE_FORMAT}") from e
+
+        try:
+            # Sort matches by date
+            sorted_matches = sorted(
+                match_data,
+                key=parse_date
+            )
+            
+            if not sorted_matches:
+                print("Warning: No matches found after sorting")
+                
+            return sorted_matches
+            
+        except ValueError as e:
+            print(f"Error sorting matches: {e}")
+            raise
+        except Exception as e:
+            print(f"Unexpected error during sorting: {e}")
+            raise
+
+    def get_match_urls(self, competition_urls: dict, competition_name: str, season: str) -> list[dict]:
         """
         Get a list of match URLs for a specific competition and season.
 
-        :param competition_url: URL of the competition's page.
-        :param competition: Name of the competition.
-        :param season: Season to fetch match URLs for.
-        :return: List of match URLs.
-        :raises ValueError: If the specified season is not found.
+        :param competition_urls: Dictionary mapping competition names to their URLs
+        :param competition_name: Name of the competition to fetch matches for
+        :param season: Season to fetch match URLs for (format: 'YYYY/YYYY')
+        :return: List of dictionaries containing match information and URLs
+        :raises ValueError: If the specified season is not found
         """
+        SEASON_LOAD_TIMEOUT = 10
+        STAGE_LOAD_TIMEOUT = 10
+        PAGE_UPDATE_DELAY = 5
+        SCROLL_DELAY = 2
+
         # Navigate to competition URL
         self.driver.get(competition_urls[competition_name])
-        time.sleep(5)
+        time.sleep(PAGE_UPDATE_DELAY)
         
         # Find and parse available seasons
-        seasons = self.driver.find_element(By.XPATH, '//*[@id="seasons"]').get_attribute('innerHTML').split('\n')
-        seasons = [s for s in seasons if s]  # Remove empty strings
+        season_dropdown = WebDriverWait(self.driver, SEASON_LOAD_TIMEOUT).until(
+            EC.presence_of_element_located((By.XPATH, '//*[@id="seasons"]'))
+        )
+        available_seasons = season_dropdown.get_attribute('innerHTML').split('\n')
+        available_seasons = [season_text for season_text in available_seasons if season_text]
         
-        # Find and click the correct season
-        for i in range(1, len(seasons) + 1):
-            if self.driver.find_element(By.XPATH, f'//*[@id="seasons"]/option[{i}]').text == season:
-                self.driver.find_element(By.XPATH, f'//*[@id="seasons"]/option[{i}]').click()
-                time.sleep(5)
+        # Find and select the requested season
+        season_found = False
+        for season_index in range(1, len(available_seasons) + 1):
+            season_option = WebDriverWait(self.driver, SEASON_LOAD_TIMEOUT).until(
+                EC.presence_of_element_located((By.XPATH, f'//*[@id="seasons"]/option[{season_index}]'))
+            )
+            if season_option.text == season:
+                season_option.click()
+                season_found = True
+                time.sleep(PAGE_UPDATE_DELAY)
+                break
                 
-                try:
-                    # Handle competitions with multiple stages
-                    stages = self.driver.find_element(By.XPATH, '//*[@id="stages"]').get_attribute('innerHTML').split('\n')
-                    stages = [s for s in stages if s]
-                    
-                    all_urls = []
-                    
-                    for i in range(1, len(stages) + 1):
-                        stage_name = self.driver.find_element(By.XPATH, f'//*[@id="stages"]/option[{i}]').text
-                        
-                        # Handle special cases for different competition types
-                        if competition_name in ['Champions League', 'Europa League']:
-                            if not ('Grp' in stage_name or 'Final Stage' in stage_name):
-                                continue
-                        elif competition_name == 'Major League Soccer':
-                            if 'Grp. ' in stage_name:
-                                continue
-                        
-                        # Click on the stage and get match data
-                        self.driver.find_element(By.XPATH, f'//*[@id="stages"]/option[{i}]').click()
-                        time.sleep(5)
-                        
-                        self.driver.execute_script("window.scrollTo(0, 400)")
-                        
-                        match_urls = self.get_fixture_data()
-                        match_urls = self.sort_match_urls(match_urls)
-                        
-                        # Filter out invalid dates
-                        valid_matches = [url for url in match_urls 
-                                      if '?' not in url['date'] and '\n' not in url['date']]
-                        
-                        all_urls.extend(valid_matches)
-                        
-                except:
-                    # Handle competitions without stages
-                    all_urls = []
-                    self.driver.execute_script("window.scrollTo(0, 400)")
-                    
-                    match_urls = self.get_fixture_data()
-                    match_urls = self.sort_match_urls(match_urls)
-                    
-                    valid_matches = [url for url in match_urls 
-                                   if '?' not in url['date'] and '\n' not in url['date']]
-                    
-                    all_urls.extend(valid_matches)
-                
-                # Remove duplicates while preserving order
-                remove_dup = [dict(t) for t in {tuple(sorted(d.items())) for d in all_urls}]
-                all_urls = self.sort_match_urls(remove_dup)
-                
-                return all_urls
-        
-        # If season not found, show available seasons and raise error
-        season_names = [re.search(r'\>(.*?)\<', season).group(1) for season in seasons]
-        raise ValueError(f'Season not found. Available seasons: {season_names}')
+        if not season_found:
+            season_list = [re.search(r'\>(.*?)\<', season_text).group(1) for season_text in available_seasons]
+            raise ValueError(f'Season not found. Available seasons: {season_list}')
 
-    def get_team_urls(self, match_urls, team_name):
+        try:
+            # Wait for competition stages dropdown
+            stages_dropdown = WebDriverWait(self.driver, STAGE_LOAD_TIMEOUT).until(
+                EC.presence_of_element_located((By.XPATH, '//*[@id="stages"]'))
+            )
+            competition_stages = stages_dropdown.get_attribute('innerHTML').split('\n')
+            competition_stages = [stage for stage in competition_stages if stage]
+            
+            match_url_list = []
+            
+            for stage_index in range(1, len(competition_stages) + 1):
+                stage_option = WebDriverWait(self.driver, STAGE_LOAD_TIMEOUT).until(
+                    EC.presence_of_element_located((By.XPATH, f'//*[@id="stages"]/option[{stage_index}]'))
+                )
+                stage_name = stage_option.text
+                
+                # Filter unwanted stages based on competition type
+                if competition_name in ['Champions League', 'Europa League']:
+                    if not ('Grp' in stage_name or 'Final Stage' in stage_name):
+                        continue
+                elif competition_name == 'Major League Soccer':
+                    if 'Grp. ' in stage_name:
+                        continue
+                
+                # Select stage and wait for page update
+                stage_option.click()
+                time.sleep(PAGE_UPDATE_DELAY)
+                
+                # Scroll to load more matches
+                self.driver.execute_script("window.scrollTo(0, 400)")
+                time.sleep(SCROLL_DELAY)
+                
+                # Get and process match URLs
+                stage_matches = self.get_fixture_data()
+                sorted_matches = self.sort_match_urls(stage_matches)
+                
+                # Filter valid matches
+                valid_stage_matches = [match for match in sorted_matches 
+                                      if '?' not in match['date'] and '\n' not in match['date']]
+                
+                match_url_list.extend(valid_stage_matches)
+                
+        except TimeoutException:
+            # Handle competitions without stages
+            print("No stages found, fetching matches directly")
+            self.driver.execute_script("window.scrollTo(0, 400)")
+            time.sleep(SCROLL_DELAY)
+            
+            all_matches = self.get_fixture_data()
+            sorted_matches = self.sort_match_urls(all_matches)
+            
+            match_url_list = [match for match in sorted_matches 
+                             if '?' not in match['date'] and '\n' not in match['date']]
+        
+        # Remove duplicates while preserving order
+        unique_matches = [dict(t) for t in {tuple(sorted(d.items())) for d in match_url_list}]
+        sorted_unique_matches = self.sort_match_urls(unique_matches)
+        
+        return sorted_unique_matches
+
+    def get_team_urls(self, match_urls: list[dict], team_name: str) -> list[dict]:
         """
         Get a list of match URLs for a specific team from a list of match URLs.
 
-        :param match_urls: List of match URLs.
-        :param team_name: Name of the team.
-        :return: List of match URLs involving the specified team.
+        :param match_urls: List of dictionaries containing match information
+                         Expected format: [{'url': 'str', 'home': 'str', 'away': 'str', ...}, ...]
+        :param team_name: Name of the team to filter matches for
+        :return: List of match URLs involving the specified team
+        :raises ValueError: If match_urls is empty or team_name is not found in any match
+        
+        Example:
+            Input: 
+                match_urls = [
+                    {'url': 'match1', 'home': 'Barcelona', 'away': 'Real Madrid'},
+                    {'url': 'match2', 'home': 'Barcelona', 'away': 'Valencia'}
+                ]
+                team_name = 'Barcelona'
+            Output: 
+                [
+                    {'url': 'match1', 'home': 'Barcelona', 'away': 'Real Madrid'},
+                    {'url': 'match2', 'home': 'Barcelona', 'away': 'Valencia'}
+                ]
         """
+        if not match_urls:
+            raise ValueError("Empty match URLs provided")
+        
+        if not team_name:
+            raise ValueError("Team name cannot be empty")
+
         # Create a dictionary to store unique match data involving the specified team
-        unique_team_data = {
-            fixture["url"]: fixture
-            for fixture in match_urls
-            if team_name in (fixture["home"], fixture["away"])
+        team_matches = {
+            match["url"]: match
+            for match in match_urls
+            if team_name in (match.get("home"), match.get("away"))
         }
 
-        # Convert the dictionary values (unique match data) back to a list
-        # This ensures that each match is only included once even if it appears multiple times
-        # (e.g., the team plays both home and away matches against the same opponent)
-        return list(unique_team_data.values())
+        if not team_matches:
+            raise ValueError(f"No matches found for team: {team_name}")
+
+        # Convert dictionary values to list, preserving match order
+        filtered_matches = list(team_matches.values())
+        
+        print(f"Found {len(filtered_matches)} matches for {team_name}")
+        return filtered_matches
 
     def get_fixture_data(self):
         """
@@ -306,66 +464,66 @@ class WhoScoredScraper:
                 'url': 'match/url/path'
             }
         """
-        matches_ls = []
+        matches_data = []
         while True:
             # Store initial page source to detect when we've reached the earliest matches
-            initial = self.driver.page_source
+            initial_page = self.driver.page_source
             
             # Find all match date accordions
-            all_fixtures = self.driver.find_elements(
+            date_accordions = self.driver.find_elements(
                 By.CLASS_NAME, 
                 'Accordion-module_accordion__UuHD0'
             )
             
-            for dates in all_fixtures:
+            for date_section in date_accordions:
                 # Get all matches for this date
-                fixtures = dates.find_elements(
+                match_rows = date_section.find_elements(
                     By.CLASS_NAME, 
                     'Match-module_row__zwBOn'
                 )
                 # Get the date header
-                date_row = dates.find_element(
+                date_header = date_section.find_element(
                     By.CLASS_NAME, 
                     'Accordion-module_header__HqzWD'
                 )
                 
-                for row in fixtures:
-                    url = row.find_element(By.TAG_NAME, 'a')
+                for match_row in match_rows:
+                    match_link = match_row.find_element(By.TAG_NAME, 'a')
                     # Only process completed matches (those with 'Live' in URL)
-                    if 'Live' in url.get_attribute('href'):
-                        match_dict = {}
+                    if 'Live' in match_link.get_attribute('href'):
+                        match_info = {}
                         # Get team names container
-                        teams_tag = row.find_element(
+                        teams_container = match_row.find_element(
                             By.CLASS_NAME, 
                             "Match-module_teams__sGVeq"
                         )
                         # Find match link containing score
-                        link_tag = row.find_element(By.TAG_NAME, "a")
+                        score_link = match_row.find_element(By.TAG_NAME, "a")
                         
                         # Build match dictionary
-                        match_dict['date'] = date_row.text
-                        match_dict['home'] = teams_tag.find_elements(By.TAG_NAME, 'a')[0].text
-                        match_dict['away'] = teams_tag.find_elements(By.TAG_NAME, 'a')[1].text
-                        match_dict['score'] = ':'.join(
-                            [span.text for span in link_tag.find_elements(By.TAG_NAME, 'span')]
+                        match_info['date'] = date_header.text
+                        match_info['home'] = teams_container.find_elements(By.TAG_NAME, 'a')[0].text
+                        match_info['away'] = teams_container.find_elements(By.TAG_NAME, 'a')[1].text
+                        match_info['score'] = ':'.join(
+                            [span.text for span in score_link.find_elements(By.TAG_NAME, 'span')]
                         )
-                        match_dict['url'] = link_tag.get_attribute('href')
-                        matches_ls.append(match_dict)
+                        match_info['url'] = score_link.get_attribute('href')
+                        matches_data.append(match_info)
             
             # Click previous button to load older matches
-            prev_btn = self.driver.find_element(
+            previous_button = self.driver.find_element(
                 By.ID, 
                 'dayChangeBtn-prev'
             )
-            prev_btn.click()
+            previous_button.click()
             time.sleep(1)  # Wait for page to update
             
             # Check if we've reached the earliest matches
-            final = self.driver.page_source
-            if initial == final:
+            final_page = self.driver.page_source
+            if initial_page == final_page:
                 break
 
-        return matches_ls
+        return matches_data
 
     def get_match_data(self, match_url):
         """
@@ -426,14 +584,59 @@ class WhoScoredScraper:
         
         return match_data
 
-    def get_matches_data(self, match_urls):
+    def get_matches_data(self, match_urls: list[dict], minimize_window: bool = True) -> list[dict]:
         """
-        Retrieve match data for a list of match URLs.
+        Retrieve detailed match data for a list of match URLs.
 
-        :param match_urls: List of dictionaries containing match URLs.
-        :return: List of dictionaries containing match data for each match URL.
+        :param match_urls: List of dictionaries containing match information and URLs
+                         Expected format: [{'url': 'str', ...}, ...]
+        :param minimize_window: Whether to minimize the browser window while scraping
+        :return: List of dictionaries containing detailed match data
+        :raises ValueError: If match_urls is empty
+        
+        Example:
+            Input: [{'url': 'match1_url'}, {'url': 'match2_url'}]
+            Output: [
+                {'matchId': '1234', 'home': 'Team1', 'away': 'Team2', ...},
+                {'matchId': '5678', 'home': 'Team3', 'away': 'Team4', ...}
+            ]
         """
-        pass
+        SCRAPE_DELAY = 7  # Delay between requests to avoid bot detection
+        
+        if not match_urls:
+            raise ValueError("Empty match URLs provided")
+            
+        collected_matches = []
+        total_matches = len(match_urls)
+        
+        def process_match(match_url: str) -> None:
+            """Helper function to process a single match"""
+            time.sleep(SCRAPE_DELAY)  # Anti-bot detection delay
+            match_details = self.get_match_data(match_url)
+            collected_matches.append(match_details)
+            
+        try:
+            # Attempt to use tqdm for progress tracking
+            from tqdm import trange
+            
+            for index in trange(total_matches, desc='Fetching Match Data'):
+                process_match(match_urls[index]['url'])
+                
+        except ImportError:
+            print('Note: Install tqdm package for progress tracking (pip install tqdm)')
+            
+            for index in range(total_matches):
+                process_match(match_urls[index]['url'])
+                print(f'Processing match {index + 1}/{total_matches}')
+                
+        except Exception as e:
+            print(f"Error during match data collection: {e}")
+            raise
+            
+        if not collected_matches:
+            print("Warning: No match data was collected")
+            
+        return collected_matches
 
     def create_matches_df(self, data):
         """
@@ -488,7 +691,8 @@ if __name__ == "__main__":
     scraper = WhoScoredScraper(maximize_window=True)
     competitions = scraper.get_competition_urls()
     match_urls = scraper.get_match_urls(competitions, 'LaLiga', '2023/2024')
-    # team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
-    match_data = scraper.get_match_data(match_urls[0]['url'])
-    print(match_data.keys())
-    # print(team_urls)
+    team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
+    match_data = scraper.get_matches_data(team_urls[0:2])
+    # match_data = scraper.get_match_data(match_urls[0]['url'])
+    # print(match_data.keys())
+    print(match_data)
