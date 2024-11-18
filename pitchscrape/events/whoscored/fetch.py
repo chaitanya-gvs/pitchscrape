@@ -6,6 +6,7 @@ import pandas as pd
 from tqdm import tqdm, trange
 from datetime import datetime
 from collections import OrderedDict
+import warnings
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -645,7 +646,25 @@ class WhoScoredScraper:
         :param data: Dictionary or list of dictionaries containing match data.
         :return: Pandas DataFrame with selected columns from match data.
         """
-        pass
+        columns_req_ls = ['match_id', 'attendance', 'venue_name', 'start_time', 'start_date',
+                          'score', 'home', 'away', 'referee'] # do we have to follow this structure?
+        matches_df = pd.DataFrame(columns=columns_req_ls)
+
+        if isinstance(data, dict):
+            # Adapted from main.py: Create DataFrame from a single match dictionary
+            matches_dict = {key: val for key, val in data.items() if key in columns_req_ls}
+            matches_df = pd.DataFrame(matches_dict, columns=columns_req_ls).reset_index(drop=True)
+            matches_df[['home', 'away']] = np.nan  
+            matches_df['home'].iloc[0] = data['home']
+            matches_df['away'].iloc[0] = data['away']
+        else:
+            # Adapted from main.py: Create DataFrame from a list of match dictionaries
+            for match in data:
+                matches_dict = {key: val for key, val in match.items() if key in columns_req_ls}
+                matches_df = pd.concat([matches_df, pd.DataFrame(matches_dict, columns=columns_req_ls)], ignore_index=True)
+
+        matches_df = matches_df.set_index('match_id')    # do we really need to do this?       
+        return matches_df
 
     def create_events_df(self, match_data):
         """
@@ -654,7 +673,104 @@ class WhoScoredScraper:
         :param match_data: Dictionary containing match data.
         :return: Pandas DataFrame containing events data.
         """
-        pass
+        events = match_data['events']
+        
+        for event in events:
+            event.update({
+                'matchId': match_data['matchId'],
+                'startDate': match_data['startDate'],
+                'startTime': match_data['startTime'],
+                'score': match_data['score'],
+                'ftScore': match_data['ftScore'],
+                'htScore': match_data['htScore'],
+                'etScore': match_data['etScore'],
+                'venueName': match_data['venueName'],
+                'maxMinute': match_data['maxMinute']
+            })
+        
+        events_df = pd.DataFrame(events)
+
+        # Clean period column
+        events_df['period'] = pd.json_normalize(events_df['period'])['displayName']
+
+        # Clean type column
+        events_df['type'] = pd.json_normalize(events_df['type'])['displayName']
+
+        # Clean outcomeType column
+        events_df['outcomeType'] = pd.json_normalize(events_df['outcomeType'])['displayName']
+
+        # Clean cardType column
+        try:
+            x = events_df['cardType'].fillna({i: {} for i in events_df.index})
+            events_df['cardType'] = pd.json_normalize(x)['displayName'].fillna(False)
+        except KeyError:
+            events_df['cardType'] = False
+
+        eventTypeDict = match_data['matchCentreEventTypeJson']  
+        events_df['satisfiedEventsTypes'] = events_df['satisfiedEventsTypes'].apply(
+            lambda x: [list(eventTypeDict.keys())[list(eventTypeDict.values()).index(event)] for event in x]
+        )
+
+        # Clean qualifiers column
+        try:
+            for i in events_df.index:
+                row = events_df.loc[i, 'qualifiers'].copy()
+                if len(row) != 0:
+                    for irow in range(len(row)):
+                        row[irow]['type'] = row[irow]['type']['displayName']
+        except TypeError:
+            pass
+
+        # Clean isShot column
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=FutureWarning)
+            if 'isShot' in events_df.columns:
+                events_df['isShot'] = events_df['isShot'].replace(np.nan, False).infer_objects(copy=False)
+            else:
+                events_df['isShot'] = False
+
+        # Clean isGoal column
+        if 'isGoal' in events_df.columns:
+            events_df['isGoal'] = events_df['isGoal'].replace(np.nan, False).infer_objects(copy=False)
+        else:
+            events_df['isGoal'] = False
+
+        # Add player name column
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=FutureWarning)
+            events_df.loc[events_df.playerId.notna(), 'playerId'] = events_df.loc[events_df.playerId.notna(), 'playerId'].astype(int).astype(str)    
+        player_name_col = events_df.loc[:, 'playerId'].map(match_data['playerIdNameDictionary']) 
+        events_df.insert(loc=events_df.columns.get_loc("playerId")+1, column='playerName', value=player_name_col)
+
+        # Add home/away column
+        h_a_col = events_df['teamId'].map({match_data['home']['teamId']: 'h', match_data['away']['teamId']: 'a'})
+        events_df.insert(loc=events_df.columns.get_loc("teamId")+1, column='h_a', value=h_a_col)
+
+        # Adding shot body part column
+        events_df['shotBodyType'] = np.nan
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=FutureWarning)
+            for i in events_df.loc[events_df.isShot == True].index:
+                for j in events_df.loc[events_df.isShot == True].qualifiers.loc[i]:
+                    if j['type'] in ['RightFoot', 'LeftFoot', 'Head', 'OtherBodyPart']:
+                        events_df.loc[i, 'shotBodyType'] = j['type']
+
+        # Adding shot situation column
+        events_df['situation'] = np.nan
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=FutureWarning)
+            for i in events_df.loc[events_df.isShot == True].index:
+                for j in events_df.loc[events_df.isShot == True].qualifiers.loc[i]:
+                    if j['type'] in ['FromCorner', 'SetPiece', 'DirectFreekick']:
+                        events_df.loc[i, 'situation'] = j['type']
+                    if j['type'] == 'RegularPlay':
+                        events_df.loc[i, 'situation'] = 'OpenPlay' 
+
+        event_types = list(match_data['matchCentreEventTypeJson'].keys())
+        event_type_cols = pd.DataFrame({event_type: pd.Series([event_type in row for row in events_df['satisfiedEventsTypes']]) for event_type in event_types})
+        events_df = pd.concat([events_df, event_type_cols], axis=1)
+
+        return events_df
 
     def get_events_df(self, match_url):
         """
@@ -663,7 +779,19 @@ class WhoScoredScraper:
         :param match_url: URL of the match.
         :return: Tuple containing match data dictionary and events DataFrame.
         """
-        pass
+        
+        try:
+            match_data = self.get_match_data(match_url)
+            # Create events DataFrame
+            print(match_data)
+            events_df = self.create_events_df(match_data)
+
+            return match_data, events_df
+        
+        except Exception as e:
+            print(f"Error retrieving events data: {e}")
+            return None, None
+         # Ensure the driver is closed
 
     def get_season_data(self, competition, season, team=None):
         """
@@ -691,8 +819,11 @@ if __name__ == "__main__":
     scraper = WhoScoredScraper(maximize_window=True)
     competitions = scraper.get_competition_urls()
     match_urls = scraper.get_match_urls(competitions, 'LaLiga', '2023/2024')
-    team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
-    match_data = scraper.get_matches_data(team_urls[0:2])
+    # team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
+    # match_data = scraper.get_matches_data(team_urls[0:2])
+    # match_df = scraper.create_matches_df(match_data)
+    print(match_urls[0])
+    events_df = scraper.get_events_df(match_urls[0]['url'])
     # match_data = scraper.get_match_data(match_urls[0]['url'])
     # print(match_data.keys())
-    print(match_data)
+    print(events_df)
