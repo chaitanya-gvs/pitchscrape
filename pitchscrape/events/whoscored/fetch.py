@@ -319,29 +319,45 @@ class WhoScoredScraper:
         STAGE_LOAD_TIMEOUT = 10
         PAGE_UPDATE_DELAY = 5
         SCROLL_DELAY = 2
+        MAX_RETRIES = 3
+
+        def wait_and_find_element(by, value, timeout=10, retries=MAX_RETRIES):
+            """Helper function to handle stale elements"""
+            for attempt in range(retries):
+                try:
+                    element = WebDriverWait(self.driver, timeout).until(
+                        EC.presence_of_element_located((by, value))
+                    )
+                    return element
+                except (StaleElementReferenceException, TimeoutException) as e:
+                    if attempt == retries - 1:  # Last attempt
+                        raise e
+                    time.sleep(1)
 
         # Navigate to competition URL
         self.driver.get(competition_urls[competition_name])
         time.sleep(PAGE_UPDATE_DELAY)
         
         # Find and parse available seasons
-        season_dropdown = WebDriverWait(self.driver, SEASON_LOAD_TIMEOUT).until(
-            EC.presence_of_element_located((By.XPATH, '//*[@id="seasons"]'))
-        )
+        season_dropdown = wait_and_find_element(By.XPATH, '//*[@id="seasons"]')
         available_seasons = season_dropdown.get_attribute('innerHTML').split('\n')
         available_seasons = [season_text for season_text in available_seasons if season_text]
         
         # Find and select the requested season
         season_found = False
         for season_index in range(1, len(available_seasons) + 1):
-            season_option = WebDriverWait(self.driver, SEASON_LOAD_TIMEOUT).until(
-                EC.presence_of_element_located((By.XPATH, f'//*[@id="seasons"]/option[{season_index}]'))
-            )
-            if season_option.text == season:
-                season_option.click()
-                season_found = True
-                time.sleep(PAGE_UPDATE_DELAY)
-                break
+            try:
+                season_option = wait_and_find_element(
+                    By.XPATH, 
+                    f'//*[@id="seasons"]/option[{season_index}]'
+                )
+                if season_option.text == season:
+                    season_option.click()
+                    season_found = True
+                    time.sleep(PAGE_UPDATE_DELAY)
+                    break
+            except StaleElementReferenceException:
+                continue
                 
         if not season_found:
             season_list = [re.search(r'\>(.*?)\<', season_text).group(1) for season_text in available_seasons]
@@ -349,45 +365,47 @@ class WhoScoredScraper:
 
         try:
             # Wait for competition stages dropdown
-            stages_dropdown = WebDriverWait(self.driver, STAGE_LOAD_TIMEOUT).until(
-                EC.presence_of_element_located((By.XPATH, '//*[@id="stages"]'))
-            )
+            stages_dropdown = wait_and_find_element(By.XPATH, '//*[@id="stages"]')
             competition_stages = stages_dropdown.get_attribute('innerHTML').split('\n')
             competition_stages = [stage for stage in competition_stages if stage]
             
             match_url_list = []
             
             for stage_index in range(1, len(competition_stages) + 1):
-                stage_option = WebDriverWait(self.driver, STAGE_LOAD_TIMEOUT).until(
-                    EC.presence_of_element_located((By.XPATH, f'//*[@id="stages"]/option[{stage_index}]'))
-                )
-                stage_name = stage_option.text
-                
-                # Filter unwanted stages based on competition type
-                if competition_name in ['Champions League', 'Europa League']:
-                    if not ('Grp' in stage_name or 'Final Stage' in stage_name):
-                        continue
-                elif competition_name == 'Major League Soccer':
-                    if 'Grp. ' in stage_name:
-                        continue
-                
-                # Select stage and wait for page update
-                stage_option.click()
-                time.sleep(PAGE_UPDATE_DELAY)
-                
-                # Scroll to load more matches
-                self.driver.execute_script("window.scrollTo(0, 400)")
-                time.sleep(SCROLL_DELAY)
-                
-                # Get and process match URLs
-                stage_matches = self.get_fixture_data()
-                sorted_matches = self.sort_match_urls(stage_matches)
-                
-                # Filter valid matches
-                valid_stage_matches = [match for match in sorted_matches 
-                                      if '?' not in match['date'] and '\n' not in match['date']]
-                
-                match_url_list.extend(valid_stage_matches)
+                try:
+                    stage_option = wait_and_find_element(
+                        By.XPATH, 
+                        f'//*[@id="stages"]/option[{stage_index}]'
+                    )
+                    stage_name = stage_option.text
+                    
+                    # Filter unwanted stages based on competition type
+                    if competition_name in ['Champions League', 'Europa League']:
+                        if not ('Grp' in stage_name or 'Final Stage' in stage_name):
+                            continue
+                    elif competition_name == 'Major League Soccer':
+                        if 'Grp. ' in stage_name:
+                            continue
+                    
+                    # Select stage and wait for page update
+                    stage_option.click()
+                    time.sleep(PAGE_UPDATE_DELAY)
+                    
+                    # Scroll to load more matches
+                    self.driver.execute_script("window.scrollTo(0, 400)")
+                    time.sleep(SCROLL_DELAY)
+                    
+                    # Get and process match URLs
+                    stage_matches = self.get_fixture_data()
+                    sorted_matches = self.sort_match_urls(stage_matches)
+                    
+                    # Filter valid matches
+                    valid_stage_matches = [match for match in sorted_matches 
+                                          if '?' not in match['date'] and '\n' not in match['date']]
+                    
+                    match_url_list.extend(valid_stage_matches)
+                except StaleElementReferenceException:
+                    continue
                 
         except TimeoutException:
             # Handle competitions without stages
@@ -802,7 +820,26 @@ class WhoScoredScraper:
         :param team: (Optional) Team name. If provided, match data will be filtered for this team.
         :return: List of dictionaries containing match data for the specified competition and season.
         """
-        pass
+        try:
+            # Get competition URLs
+            competition_urls = self.get_competition_urls()
+            
+            # Get match URLs for the competition and season
+            match_urls = self.get_match_urls(competition_urls, competition, season)
+            
+            # Filter for specific team if provided
+            if team:
+                match_urls = self.get_team_urls(team_name=team, match_urls=match_urls)
+                
+            
+            # Get detailed match data
+            matches_data = self.get_matches_data(match_urls[:2])
+            
+            return matches_data
+            
+        except Exception as e:
+            print(f"Error retrieving season data: {e}")
+            return None
 
     def get_season_events(self, competition, season, team=None):
         """
@@ -813,17 +850,43 @@ class WhoScoredScraper:
         :param team: (Optional) Team name. If provided, events will be filtered for this team.
         :return: Pandas DataFrame containing season events data.
         """
-        pass
+        try:
+            # Get match data for the season
+            matches_data = self.get_season_data(competition, season, team)
+            
+            if not matches_data:
+                return None
+            
+            # Create events DataFrame for each match and concatenate
+            all_events = []
+            for match in matches_data:
+                events_df = self.create_events_df(match)
+                all_events.append(events_df)
+            
+            # Combine all events into a single DataFrame
+            if all_events:
+                combined_events = pd.concat(all_events, ignore_index=True)
+                return combined_events
+            else:
+                print("No events data found")
+                return None
+                
+        except Exception as e:
+            print(f"Error retrieving season events: {e}")
+            return None
     
 if __name__ == "__main__":
     scraper = WhoScoredScraper(maximize_window=True)
-    competitions = scraper.get_competition_urls()
-    match_urls = scraper.get_match_urls(competitions, 'LaLiga', '2023/2024')
+    # competitions = scraper.get_competition_urls()
+    # match_urls = scraper.get_match_urls(competitions, 'LaLiga', '2023/2024')
     # team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
     # match_data = scraper.get_matches_data(team_urls[0:2])
     # match_df = scraper.create_matches_df(match_data)
-    print(match_urls[0])
-    events_df = scraper.get_events_df(match_urls[0]['url'])
+    # print(match_urls[0])
+    # events_df = scraper.get_events_df(match_urls[0]['url'])
+    # season_data = scraper.get_season_data('LaLiga', '2023/2024')
+    season_events = scraper.get_season_events('LaLiga', '2023/2024', 'Barcelona')
     # match_data = scraper.get_match_data(match_urls[0]['url'])
     # print(match_data.keys())
-    print(events_df)
+    print(season_events)
+    # print(season_events)
