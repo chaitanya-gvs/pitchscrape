@@ -7,6 +7,7 @@ from tqdm import tqdm, trange
 from datetime import datetime
 from collections import OrderedDict
 import warnings
+from typing import Union
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -635,9 +636,7 @@ class WhoScoredScraper:
             collected_matches.append(match_details)
             
         try:
-            # Attempt to use tqdm for progress tracking
-            from tqdm import trange
-            
+
             for index in trange(total_matches, desc='Fetching Match Data'):
                 process_match(match_urls[index]['url'])
                 
@@ -657,32 +656,83 @@ class WhoScoredScraper:
             
         return collected_matches
 
-    def create_matches_df(self, data):
+    def create_matches_dataframe(self, match_data: Union[dict, list[dict]]) -> pd.DataFrame:
         """
-        Create a Pandas DataFrame from match data.
+        Create a Pandas DataFrame from match data with selected columns.
 
-        :param data: Dictionary or list of dictionaries containing match data.
-        :return: Pandas DataFrame with selected columns from match data.
+        :param match_data: Single match dictionary or list of match dictionaries
+                         Must contain basic match information (matchId, teams, venue, etc.)
+        :return: Pandas DataFrame indexed by matchId with standardized match information
+        :raises ValueError: If input data is empty or has invalid format
+        
+        Example:
+            Input: [{
+                'matchId': '1234',
+                'home': 'Barcelona',
+                'away': 'Real Madrid',
+                'attendance': 95000,
+                ...
+            }]
+            Output: DataFrame(
+                index='matchId',
+                columns=['attendance', 'venueName', 'startTime', ...]
+            )
         """
-        columns_req_ls = ['match_id', 'attendance', 'venue_name', 'start_time', 'start_date',
-                          'score', 'home', 'away', 'referee'] # do we have to follow this structure?
-        matches_df = pd.DataFrame(columns=columns_req_ls)
+        # Define standard column names and their display labels
+        MATCH_COLUMNS = {
+            "matchId": "Match Identifier",
+            "attendance": "Stadium Attendance",
+            "venueName": "Stadium Name",
+            "startTime": "Kickoff Time",
+            "startDate": "Match Date",
+            "score": "Final Score",
+            "home": "Home Team",
+            "away": "Away Team",
+            "referee": "Match Referee"
+        }
+        
+        def validate_match_data(input_data: Union[dict, list[dict]]) -> list[dict]:
+            """Validate and standardize input match data"""
+            if not input_data:
+                raise ValueError("Empty match data provided")
+                
+            # Convert single match dictionary to list
+            if isinstance(input_data, dict):
+                return [input_data]
+            elif isinstance(input_data, list):
+                if not all(isinstance(match_entry, dict) for match_entry in input_data):
+                    raise ValueError("All elements must be dictionaries")
+                return input_data
+            else:
+                raise ValueError(
+                    f"Expected dict or list of dicts, got {type(input_data).__name__}"
+                )
 
-        if isinstance(data, dict):
-            # Adapted from main.py: Create DataFrame from a single match dictionary
-            matches_dict = {key: val for key, val in data.items() if key in columns_req_ls}
-            matches_df = pd.DataFrame(matches_dict, columns=columns_req_ls).reset_index(drop=True)
-            matches_df[['home', 'away']] = np.nan  
-            matches_df['home'].iloc[0] = data['home']
-            matches_df['away'].iloc[0] = data['away']
-        else:
-            # Adapted from main.py: Create DataFrame from a list of match dictionaries
-            for match in data:
-                matches_dict = {key: val for key, val in match.items() if key in columns_req_ls}
-                matches_df = pd.concat([matches_df, pd.DataFrame(matches_dict, columns=columns_req_ls)], ignore_index=True)
-
-        matches_df = matches_df.set_index('match_id')    # do we really need to do this?       
-        return matches_df
+        try:
+            # Validate and standardize input
+            validated_matches = validate_match_data(match_data)
+            
+            # Create DataFrame directly from validated data
+            match_dataframe = pd.DataFrame(validated_matches)
+            
+            # Select and rename required columns
+            match_dataframe = match_dataframe[MATCH_COLUMNS.keys()]
+            match_dataframe.rename(columns=MATCH_COLUMNS, inplace=True)
+            
+            # Set index and handle missing values
+            match_dataframe.set_index("Match Identifier", inplace=True)
+            match_dataframe.fillna(np.nan, inplace=True)
+            
+            # Validate that we have data
+            if match_dataframe.empty:
+                print("Warning: Created DataFrame contains no match data")
+                
+            return match_dataframe
+            
+        except KeyError as missing_column:
+            raise ValueError(f"Required match column missing: {missing_column}")
+        except Exception as error:
+            raise ValueError(f"Error creating match DataFrame: {error}")
 
     def create_events_df(self, match_data):
         """
