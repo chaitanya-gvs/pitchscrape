@@ -316,13 +316,12 @@ class WhoScoredScraper:
         :return: List of dictionaries containing match information and URLs
         :raises ValueError: If the specified season is not found
         """
-        SEASON_LOAD_TIMEOUT = 10
-        STAGE_LOAD_TIMEOUT = 10
+        TIMEOUT = 10
         PAGE_UPDATE_DELAY = 5
         SCROLL_DELAY = 2
         MAX_RETRIES = 3
 
-        def wait_and_find_element(by, value, timeout=10, retries=MAX_RETRIES):
+        def wait_and_find_element(by, value, timeout=TIMEOUT, retries=MAX_RETRIES):
             """Helper function to handle stale elements"""
             for attempt in range(retries):
                 try:
@@ -599,8 +598,6 @@ class WhoScoredScraper:
         # Sort match_data dictionary alphabetically
         match_data = OrderedDict(sorted(match_data.items()))
         match_data = dict(match_data)
-
-        # print('Region: {}, League: {}, Season: {}, Match Id: {}'.format(region, league, season, match_data['matchId']))
         
         return match_data
 
@@ -929,14 +926,14 @@ if __name__ == "__main__":
     scraper = WhoScoredScraper(maximize_window=True)
     # competitions = scraper.get_competition_urls()
     # match_urls = scraper.get_match_urls(competitions, 'LaLiga', '2023/2024')
-    # team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
+    team_urls = scraper.get_team_urls(match_urls, 'Barcelona')
     # match_data = scraper.get_matches_data(team_urls[0:2])
     # match_df = scraper.create_matches_df(match_data)
     # print(match_urls[0])
     # events_df = scraper.get_events_df(match_urls[0]['url'])
     # season_data = scraper.get_season_data('LaLiga', '2023/2024')
     season_events = scraper.get_season_events('LaLiga', '2023/2024', 'Barcelona')
-    # match_data = scraper.get_match_data(match_urls[0]['url'])
+    match_data = scraper.get_match_data(match_urls[0]['url'])
     # print(match_data.keys())
     print(season_events)
     # print(season_events)
